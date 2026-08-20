@@ -18,9 +18,20 @@ import logging
 import sys
 from pathlib import Path
 
+# import cachey
+# import dask
+# import dask.cache
+# import torch
+# import tqdm.dask
+# import xarray
 import cachey
 import dask
 import dask.cache
+
+# Windows workaround: load Arrow/Dask dataframe before PyTorch.
+import pyarrow
+import dask.dataframe as dd
+
 import torch
 import tqdm.dask
 import xarray

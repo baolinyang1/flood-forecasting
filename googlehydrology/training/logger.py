@@ -16,6 +16,7 @@ from collections import defaultdict
 from pathlib import Path
 
 import matplotlib as mpl
+import matplotlib.figure
 import numpy as np
 from torch.utils.tensorboard import SummaryWriter
 
