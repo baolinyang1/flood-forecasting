@@ -184,36 +184,48 @@ class _SamplingSetup:
 
         dropout_modules = [model.dropout.p]
 
-        # Certain models don't have embedding_net(s)
-        implied_statics_embedding, implied_dynamics_embedding = None, None
+        def _embedding_dropout(module: torch.nn.Module | None, attr: str) -> float:
+            """Read dropout from an embedding module; Identity/missing → 0.0."""
+            if module is None:
+                return 0.0
+            return float(getattr(module, attr, 0.0) or 0.0)
+
+        # Certain models don't have embedding_net(s), or use nn.Identity placeholders
+        # (e.g. handoff_forecast_lstm with empty hindcast/forecast embeddings).
+        implied_statics_embedding = None
+        implied_dynamics_embedding = None
+        implied_forecast_statics_embedding = None
+        implied_forecast_dynamics_embedding = None
+        implied_hindcast_statics_embedding = None
+        implied_hindcast_dynamics_embedding = None
         if hasattr(model, 'forecast_embedding_net'):
-            implied_forecast_statics_embedding = (
-                model.forecast_embedding_net.statics_embedding_p_dropout
+            implied_forecast_statics_embedding = _embedding_dropout(
+                model.forecast_embedding_net, 'statics_embedding_p_dropout'
             )
-            implied_forecast_dynamics_embedding = (
-                model.forecast_embedding_net.dynamics_embedding_p_dropout
+            implied_forecast_dynamics_embedding = _embedding_dropout(
+                model.forecast_embedding_net, 'dynamics_embedding_p_dropout'
             )
             dropout_modules += [
                 implied_forecast_statics_embedding,
                 implied_forecast_dynamics_embedding,
             ]
         if hasattr(model, 'hindcast_embedding_net'):
-            implied_hindcast_statics_embedding = (
-                model.hindcast_embedding_net.statics_embedding_p_dropout
+            implied_hindcast_statics_embedding = _embedding_dropout(
+                model.hindcast_embedding_net, 'statics_embedding_p_dropout'
             )
-            implied_hindcast_dynamics_embedding = (
-                model.hindcast_embedding_net.dynamics_embedding_p_dropout
+            implied_hindcast_dynamics_embedding = _embedding_dropout(
+                model.hindcast_embedding_net, 'dynamics_embedding_p_dropout'
             )
             dropout_modules += [
                 implied_hindcast_statics_embedding,
                 implied_hindcast_dynamics_embedding,
             ]
         if hasattr(model, 'embedding_net'):
-            implied_statics_embedding = (
-                model.embedding_net.statics_embedding_p_dropout
+            implied_statics_embedding = _embedding_dropout(
+                model.embedding_net, 'statics_embedding_p_dropout'
             )
-            implied_dynamics_embedding = (
-                model.embedding_net.dynamics_embedding_p_dropout
+            implied_dynamics_embedding = _embedding_dropout(
+                model.embedding_net, 'dynamics_embedding_p_dropout'
             )
             dropout_modules += [
                 implied_statics_embedding,

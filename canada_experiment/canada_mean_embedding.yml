@@ -300,7 +300,7 @@ loss: cmalloss
 
 # -- Training Loop --
 # Number of times the model sees the entire training dataset.
-epochs: 30
+epochs: 125
 
 # Number of samples processed at once before updating weights.
 batch_size: 512
