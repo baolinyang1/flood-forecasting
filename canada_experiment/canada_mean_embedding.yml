@@ -38,7 +38,7 @@ experiment_name: canada-me-lstm-watershed-1433
 
 # Directory where model artifacts (weights, config copy, logs) will be saved.
 # IMPORTANT: You must ensure this path exists or can be created.
-run_dir: C:\Users\nyk750\flood-forecasting\canada_experiment\runs
+run_dir: /u2/users/nyk750/flood-forecasting/canada_experiment\runs
 
 # Controls how much information is printed to the console during training.
 # Options: DEBUG, INFO, WARNING, ERROR. 'INFO' is good standard practice.
@@ -61,14 +61,14 @@ dataset: multimet
 
 # -- File Paths (UPDATE THESE TO MATCH YOUR SYSTEM) --
 # Paths to text files containing lists of basin IDs for training, validation, and testing.
-train_basin_file: C:\Users\nyk750\flood-forecasting\canada_experiment\basins\train_watershed.txt
-validation_basin_file: C:\Users\nyk750\flood-forecasting\canada_experiment\basins\validation_watershed.txt
-test_basin_file: C:\Users\nyk750\flood-forecasting\canada_experiment\basins\test_watershed.txt
+train_basin_file: /u2/users/nyk750/flood-forecasting/canada_experiment/basins/train_watershed.txt
+validation_basin_file: /u2/users/nyk750/flood-forecasting/canada_experiment/basins/validation_watershed.txt
+test_basin_file: /u2/users/nyk750/flood-forecasting/canada_experiment/basins/test_watershed.txt
 
 # Directory containing the target data (streamflow observations).
-targets_data_dir: C:\Users\nyk750\Caravan-nc\Caravan-nc
+targets_data_dir: /u2/users/nyk750/Caravan-nc
 # Directory containing static catchment attributes (e.g., area, elevation).
-statics_data_dir: C:\Users\nyk750\Caravan-nc\Caravan-nc
+statics_data_dir: /u2/users/nyk750/Caravan-nc
 # Directory containing dynamic meteorological forcing data (rain, temp, etc.).
 # 'gs://' indicates data is streamed directly from Google Cloud Storage.
 dynamics_data_dir: gs://caravan-multimet/v1.1
