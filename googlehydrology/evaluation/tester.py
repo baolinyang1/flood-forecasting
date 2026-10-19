@@ -26,6 +26,7 @@ import pandas as pd
 import torch
 import torch.cuda
 import xarray
+import zarr
 from torch.amp import autocast
 from torch.utils.data import Dataset
 
@@ -92,6 +93,13 @@ class BaseTester(object):
                 f'Invalid period {period}. Must be one of ["train", "validation", "test"]'
             )
 
+        if getattr(self.cfg, 'hot_start_path', None) is not None:
+            if self.cfg.batch_size != 1:
+                raise ValueError(
+                    f'Hot-start inference requires batch_size=1 per basin. '
+                    f'Got batch_size={self.cfg.batch_size}.'
+                )
+
         # determine device
         self._set_device()
 
@@ -120,7 +128,7 @@ class BaseTester(object):
         if self.cfg.device is not None:
             if self.cfg.device.startswith('cuda'):
                 gpu_id = int(self.cfg.device.split(':')[-1])
-                if gpu_id > torch.cuda.device_count():
+                if gpu_id >= torch.cuda.device_count():
                     raise RuntimeError(
                         f'This machine does not have GPU #{gpu_id} '
                     )
@@ -162,17 +170,16 @@ class BaseTester(object):
         """Load weights of a certain (or the last) epoch into the model."""
         weight_file = self._get_weight_file(epoch)
 
-        LOGGER.info(f'Using the model weights from {weight_file}')
+        LOGGER.info('Using the model weights from %s', weight_file)
         state_dict = torch.load(
             weight_file, map_location=self.device, weights_only=True
         )
-        # Drop `_orig_mod.` prefix introduced by torch.compile when the model
-        # was trained with compile=True but is now loaded without compilation.
-        if any(k.startswith('_orig_mod.') for k in state_dict):
-            state_dict = {
-                k[len('_orig_mod.'):]: v for k, v in state_dict.items()
-            }
-        self.model.load_state_dict(state_dict)
+        # Drop `_orig_mod.` prefix introduced by torch.compile.
+        state_dict = {
+            k.removeprefix('_orig_mod.'): v for k, v in state_dict.items()
+        }
+        model_to_load = getattr(self.model, '_orig_mod', self.model)
+        model_to_load.load_state_dict(state_dict)
 
     def _get_dataset_all(self) -> Dataset:
         """Get dataset for all basins."""
@@ -332,9 +339,14 @@ class BaseTester(object):
                     and self.dataset.lead_time
                 ):
                     time_step_coords += self.dataset.lead_time
-                    date_coords = dates[lowest_freq][
-                        :, -self.dataset.lead_time - 1
-                    ]
+                    # The last target date is the issue date plus the number of
+                    # forecast steps beyond the (1-indexed) first lead time.
+                    # Deriving the issue date from it, instead of indexing a
+                    # column, also works when predict_last_n < lead_time.
+                    min_lead_time = getattr(self.dataset, 'min_lead_time', 1)
+                    date_coords = dates[lowest_freq][:, -1] - (
+                        self.dataset.lead_time - min_lead_time
+                    ) * pd.Timedelta(lowest_freq)
                 coords = {'date': date_coords, 'time_step': time_step_coords}
                 xr = xarray.Dataset(data_vars=data_vars, coords=coords)
                 xr = xr.reindex(
@@ -497,6 +509,17 @@ class BaseTester(object):
                 for name, metric in freq_metrics.items():
                     median = np.nanmedian(metric)
                     LOGGER.info('%s %s median=%f', freq, name, median)
+
+        # Consolidate metadata for the output Zarr store if one was created
+        if self.cfg.inference_mode and self.period == 'test' and save_results:
+            parent_directory = self._parent_directory_for_results(epoch)
+            result_file = parent_directory / f'{self.period}_results.zarr'
+            if result_file.exists():
+                try:
+                    zarr.consolidate_metadata(str(result_file))
+                    LOGGER.debug('Consolidated metadata for %s', result_file)
+                except Exception as e:
+                    LOGGER.warning('Could not consolidate metadata for %s: %s', result_file, e)
 
     def _calc_exclude_basins(self) -> Iterator[str]:
         if not self.cfg.tester_skip_obs_all_nan:
@@ -666,13 +689,28 @@ class BaseTester(object):
                 if basin not in basins:
                     continue
 
+                model.reset_state()
+                # Pre-load hot-start state for this basin if configured
+                if getattr(self.cfg, 'hot_start_path', None) is not None:
+                    state_path = self.cfg.hot_start_path
+                    if state_path.is_dir():
+                        basin_state = state_path / f'state_{basin}.npz'
+                        if not basin_state.exists():
+                            basin_state = state_path / f'{basin}.npz'
+                    else:
+                        basin_state = state_path
+                    if basin_state.exists():
+                        model.load_state_from_disk(basin_state)
+
                 preds = {}
                 obs = {}
                 dates = {}
                 losses = []
                 mean_losses = {}
+                last_data = None
 
                 for data in samples:
+                    last_data = data
                     for key in data:
                         if key.startswith('x_d'):
                             data[key] = {
@@ -719,6 +757,17 @@ class BaseTester(object):
 
                     losses.append(loss)
 
+                # Save hot-start state for this basin if configured
+                if (
+                    getattr(self.cfg, 'save_state', False)
+                    and last_data is not None
+                    and self.period != 'train'
+                ):
+                    save_dir = self.run_dir / 'hot_start_states'
+                    save_dir.mkdir(parents=True, exist_ok=True)
+                    state_save_path = save_dir / f'state_{basin}.npz'
+                    model.save_state(last_data, state_save_path)
+
                 # set to NaN explicitly if all losses are NaN to avoid RuntimeWarning
                 if len(losses) == 0:
                     mean_losses['loss'] = np.nan
@@ -739,8 +788,12 @@ class BaseTester(object):
                     'losses': losses,
                     'mean_losses': mean_losses,
                 }
-                if torch.cuda.is_available():  # Await gpu to cpu copies
-                    torch.cuda.synchronize()
+                # Await the non-blocking GPU -> CPU copies above. Without an
+                # explicit device, `synchronize` only waits on the *current*
+                # device (cuda:0), so on any other GPU the copied arrays could
+                # still be incomplete when read.
+                if self.device.type == 'cuda':
+                    torch.cuda.synchronize(self.device)
                 yield res
 
     def _get_predictions_and_loss(

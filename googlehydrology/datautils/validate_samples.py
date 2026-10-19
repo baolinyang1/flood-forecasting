@@ -133,7 +133,9 @@ def validate_samples(
 
         masks.append(
             validate_sequence_all(
-                mask=mask, seq_length=seq_length, shift_right=0
+                mask=mask,
+                seq_length=seq_length,
+                shift_right=-(min_lead_time or 0),
             ).rename('hindcasts')
         )
 
@@ -191,7 +193,9 @@ def validate_samples(
         mask = validate_samples_any(dataset=dataset_targets)
         masks.append(
             validate_sequence_any(
-                mask=mask, seq_length=predict_last_n, shift_right=lead_time
+                mask=mask,
+                seq_length=predict_last_n,
+                shift_right=lead_time - (min_lead_time or 0),
             ).rename('targets')
         )
 
@@ -405,6 +409,9 @@ def validate_sequence_all(
     """
     mask = mask.fillna(False)
 
+    if seq_length <= 0:
+        return xr.full_like(mask, True, dtype=bool)
+
     # The sliding window is valid if ALL timestemps are True which is what
     # min represents in the window being True (1).
     valid_windows = mask.rolling(date=seq_length, min_periods=seq_length).min()
@@ -446,6 +453,9 @@ def validate_sequence_any(
         Boolean valid sample mask.
     """
     mask = mask.fillna(False)
+
+    if seq_length <= 0:
+        return xr.full_like(mask, True, dtype=bool)
 
     # The sliding window is valid if ANY timestemp is True which is what
     # max represents in the window being True (1).

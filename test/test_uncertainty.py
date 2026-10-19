@@ -50,7 +50,6 @@ def test_daily_uncertainty(
     ('none', 'clip', 'truncate') and with or without Monte Carlo dropout.
     """
 
-    # TODO (future) :: clip fails with CMAL-deterministic, should call _handle_negative_values
     config = get_config('forecast')
     updates = {
         'model': forecast_model,
@@ -136,8 +135,9 @@ def _check_uncertainty_output(
     ]
     if negative_sample_handling == 'clip':
         # For 'clip', we expect all non-negative values
+        min_val = np.min(negative_vals) if len(negative_vals) > 0 else 0.0
         assert np.allclose(negative_vals, 0.0, atol=1e-6), (
-            f'Found negative samples below tolerance. Smallest val: {np.min(negative_vals)}'
+            f'Found negative samples below tolerance. Smallest val: {min_val}'
         )
     elif negative_sample_handling == 'truncate':
         # TODO: Implement a more robust check for 'truncate' handling

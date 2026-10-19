@@ -62,7 +62,9 @@ def sample_pointpredictions(
     if model.cfg.head.lower() == 'cmal':
         samples = sample_cmal(model, data, n_samples, scaler, outputs=outputs)
     elif model.cfg.head.lower() == 'cmal_deterministic':
-        samples = sample_cmal_deterministic(model, data, outputs=outputs)
+        samples = sample_cmal_deterministic(
+            model, data, scaler, outputs=outputs
+        )
     elif model.cfg.head.lower() == 'regression':  # regression head assumes mcd
         assert not outputs, 'regression self creates outputs'
         samples = sample_mcd(model, data, n_samples, scaler)
@@ -182,79 +184,35 @@ class _SamplingSetup:
                 f'{head} sampling not supported for the {cfg.head} head!'
             )
 
-        dropout_modules = [model.dropout.p]
+        dropout_rates = []
+        if hasattr(model, 'dropout') and hasattr(model.dropout, 'p'):
+            dropout_rates.append(model.dropout.p)
+        if hasattr(model, 'modules'):
+            for m in model.modules():
+                if isinstance(
+                    m, (torch.nn.Dropout, torch.nn.modules.dropout._DropoutNd)
+                ):
+                    dropout_rates.append(m.p)
+                elif (
+                    isinstance(m, torch.nn.LSTM)
+                    and m.num_layers > 1
+                    and m.dropout > 0
+                ):
+                    dropout_rates.append(m.dropout)
 
-        def _embedding_dropout(module: torch.nn.Module | None, attr: str) -> float:
-            """Read dropout from an embedding module; Identity/missing → 0.0."""
-            if module is None:
-                return 0.0
-            return float(getattr(module, attr, 0.0) or 0.0)
-
-        # Certain models don't have embedding_net(s), or use nn.Identity placeholders
-        # (e.g. handoff_forecast_lstm with empty hindcast/forecast embeddings).
-        implied_statics_embedding = None
-        implied_dynamics_embedding = None
-        implied_forecast_statics_embedding = None
-        implied_forecast_dynamics_embedding = None
-        implied_hindcast_statics_embedding = None
-        implied_hindcast_dynamics_embedding = None
-        if hasattr(model, 'forecast_embedding_net'):
-            implied_forecast_statics_embedding = _embedding_dropout(
-                model.forecast_embedding_net, 'statics_embedding_p_dropout'
-            )
-            implied_forecast_dynamics_embedding = _embedding_dropout(
-                model.forecast_embedding_net, 'dynamics_embedding_p_dropout'
-            )
-            dropout_modules += [
-                implied_forecast_statics_embedding,
-                implied_forecast_dynamics_embedding,
-            ]
-        if hasattr(model, 'hindcast_embedding_net'):
-            implied_hindcast_statics_embedding = _embedding_dropout(
-                model.hindcast_embedding_net, 'statics_embedding_p_dropout'
-            )
-            implied_hindcast_dynamics_embedding = _embedding_dropout(
-                model.hindcast_embedding_net, 'dynamics_embedding_p_dropout'
-            )
-            dropout_modules += [
-                implied_hindcast_statics_embedding,
-                implied_hindcast_dynamics_embedding,
-            ]
-        if hasattr(model, 'embedding_net'):
-            implied_statics_embedding = _embedding_dropout(
-                model.embedding_net, 'statics_embedding_p_dropout'
-            )
-            implied_dynamics_embedding = _embedding_dropout(
-                model.embedding_net, 'dynamics_embedding_p_dropout'
-            )
-            dropout_modules += [
-                implied_statics_embedding,
-                implied_dynamics_embedding,
-            ]
-
-        max_implied_dropout = max(dropout_modules)
+        max_implied_dropout = max(dropout_rates, default=0.0)
         # check lower bound dropout:
         if cfg.mc_dropout and max_implied_dropout <= 0.0:
-            raise RuntimeError(f"""{cfg.model} with `mc_dropout` activated requires a dropout rate larger than 0.0
-                               The current implied dropout-rates are:
-                                  - model: {cfg.output_dropout}
-                                  - statics_embedding: {implied_statics_embedding}
-                                  - dynamics_embedding: {implied_dynamics_embedding}
-                                  - statics_forecast_embedding: {implied_forecast_statics_embedding}
-                                  - dynamics_forecast_embedding: {implied_forecast_dynamics_embedding}
-                                  - statics_hindcast_embedding: {implied_hindcast_statics_embedding}
-                                  - dynamics_hindcast_embedding: {implied_hindcast_dynamics_embedding}""")
+            raise RuntimeError(
+                f'{cfg.model} with `mc_dropout` activated requires a dropout'
+                f' rate larger than 0.0, but maximum implied dropout is {max_implied_dropout}.'
+            )
         # check upper bound dropout:
         if cfg.mc_dropout and max_implied_dropout >= 1.0:
-            raise RuntimeError(f"""The maximal dropout-rate is 1. Please check your dropout-settings:
-                               The current implied dropout-rates are:
-                                  - model: {cfg.output_dropout}
-                                  - statics_embedding: {implied_statics_embedding}
-                                  - dynamics_embedding: {implied_dynamics_embedding}
-                                  - statics_forecast_embedding: {implied_forecast_statics_embedding}
-                                  - dynamics_forecast_embedding: {implied_forecast_dynamics_embedding}
-                                  - statics_hindcast_embedding: {implied_hindcast_statics_embedding}
-                                  - dynamics_hindcast_embedding: {implied_hindcast_dynamics_embedding}""")
+            raise RuntimeError(
+                f'The maximal dropout-rate is 1. Please check your settings; '
+                f'maximum implied dropout is {max_implied_dropout}.'
+            )
 
         # assign setup properties:
         self.cfg = cfg
@@ -374,6 +332,7 @@ def sample_mcd(
 def sample_cmal_deterministic(
     model: 'BaseModel',
     data: dict[str, torch.Tensor],
+    scaler: Scaler,
     *,
     outputs: dict[str, torch.Tensor] | None = None,
 ) -> dict[str, torch.Tensor]:
@@ -388,6 +347,8 @@ def sample_cmal_deterministic(
         A model with a CMAL head.
     data : dict[str, torch.Tensor]
         Dictionary, containing input features as key-value pairs.
+    scaler : Scaler
+        Scaler of the run.
     outputs, optional
         Model forward result
 
@@ -408,6 +369,20 @@ def sample_cmal_deterministic(
     # not point predictions.
     pred = outputs or model(data)
 
+    # This head returns summary statistics (the mixture mean plus nine
+    # quantiles), not random draws, so 'truncate' has nothing to resample and
+    # is a no-op here. Everything else is delegated to the shared negative
+    # value handler, so an unsupported value still raises.
+    negative_handling = (setup.cfg.negative_sample_handling or '').lower()
+    normalized_zeros = None
+    if negative_handling not in ('', 'none', 'truncate'):
+        normalized_zeros = _calc_normalized_zero_thresholds(
+            scaler=scaler,
+            targets=setup.cfg.target_variables,
+            device=next(model.parameters()).device,
+            dtype=next(model.parameters()).dtype,
+        )
+
     # Map output frequencies to final sample tensors:
     samples = {}
 
@@ -418,10 +393,21 @@ def sample_cmal_deterministic(
         tau = pred[f'tau{freq_suffix}']  # asymmetries
         pi = pred[f'pi{freq_suffix}']  # weights
 
-        sample_points = [
-            cmal_deterministic.generate_predictions(mu, b, tau, pi)
-        ]
-        samples[f'y_hat{freq_suffix}'] = torch.stack(sample_points, 2)
+        values = cmal_deterministic.generate_predictions(mu, b, tau, pi)
+        # Element 0 is the mixture mean. Clipping it applies a physical floor
+        # to E[X]; it is not the distributional correction E[max(X, 0)].
+        if normalized_zeros is not None:
+            values = _handle_negative_values(
+                setup.cfg,
+                values,
+                # Unused: 'clip' never resamples, and a summary statistic
+                # cannot be redrawn.
+                sample_values=lambda _: values,
+                # generate_predictions collapses every target into a single
+                # mixture, so values only ever holds target 0.
+                normalized_zero=normalized_zeros[0],
+            )
+        samples[f'y_hat{freq_suffix}'] = torch.stack([values], 2)
 
     return samples
 
@@ -613,4 +599,3 @@ def sample_cmal(
         samples[f'y_hat{freq_suffix}'] = torch.stack(sample_points, dim=2)
 
     return samples
-
