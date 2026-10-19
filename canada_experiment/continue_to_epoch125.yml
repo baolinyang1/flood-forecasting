@@ -1,0 +1,5 @@
+# Override for continue_training: train from current checkpoint (epoch 067)
+# through epoch 125. In this codebase, `epochs` is ADDITIONAL epochs.
+epochs: 58
+validate_n_random_basins: 10
+validate_every: 50
